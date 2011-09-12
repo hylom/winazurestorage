@@ -15,6 +15,7 @@ import os
 from xml.dom import minidom #TODO: Use a faster way of processing XML
 import re
 from urllib2 import Request, urlopen, URLError
+from urllib import urlencode
 from urlparse import urlsplit
 from datetime import datetime, timedelta
 
@@ -310,11 +311,12 @@ class BlobStorage(Storage):
         
         dom.unlink() #Docs say to do this to force GC. Ugh.
 
-    def put_blob(self, container_name, blob_name, data, content_type = None):
+    def put_blob(self, container_name, blob_name, data, content_type = "", metadata = {}):
         req = RequestWithMethod("PUT", "%s/%s/%s" % (self.get_base_url(), container_name, blob_name), data=data)
         req.add_header("Content-Length", "%d" % len(data))
-        if content_type is not None: req.add_header("Content-Type", content_type)
-        else: req.add_header("Content-Type", "")
+        for key, value in metadata.items():
+            req.add_header("x-ms-meta-%s" % key, value)
+        req.add_header("Content-Type", content_type)
         self._credentials.sign_request(req)
         try:
             response = urlopen(req)
@@ -322,10 +324,53 @@ class BlobStorage(Storage):
         except URLError, e:
             return e.code
 
+    def delete_blob(self, container_name, blob_name):
+        req = RequestWithMethod("DELETE", "%s/%s/%s" % (self.get_base_url(), container_name, blob_name))
+        self._credentials.sign_request(req)
+        urlopen(req)
+
     def get_blob(self, container_name, blob_name):
         req = Request("%s/%s/%s" % (self.get_base_url(), container_name, blob_name))
         self._credentials.sign_request(req)
         return urlopen(req).read()
+
+    def get_blob_with_metadata(self, container_name, blob_name):
+        req = Request("%s/%s/%s" % (self.get_base_url(), container_name, blob_name))
+        self._credentials.sign_request(req)
+        response = urlopen(req)
+        metadata = {}
+        for key, value in response.info().items():
+            if key.startswith('x-ms-meta-'):
+                metadata[key[len('x-ms-meta-'):]] = value
+        return metadata, response.read()
+
+    def blob_exists(self, container_name, blob_name):
+        req = RequestWithMethod("HEAD", "%s/%s/%s" % (self.get_base_url(), container_name, blob_name))
+        self._credentials.sign_request(req)
+        try:
+            urlopen(req)
+            return True
+        except:
+            return False
+		
+    def list_blobs(self, container_name, blob_prefix=None):
+        marker = None
+        while True:
+            url = "%s/%s?restype=container&comp=list" % (self.get_base_url(), container_name)
+            if not blob_prefix is None: url += "&%s" % urlencode({"prefix": blob_prefix})
+            if not marker is None: url += "&marker=%s" % marker
+            req = Request(url)
+            self._credentials.sign_request(req)
+            dom = minidom.parseString(urlopen(req).read())
+            blobs = dom.getElementsByTagName("Blob")
+            for blob in blobs:
+                blob_name = blob.getElementsByTagName("Name")[0].firstChild.data
+                etag = blob.getElementsByTagName("Etag")[0].firstChild.data
+                last_modified = time.strptime(blob.getElementsByTagName("LastModified")[0].firstChild.data, TIME_FORMAT)
+                yield (blob_name, etag, last_modified)
+            try: marker = dom.getElementsByTagName("NextMarker")[0].firstChild.data
+            except: marker = None
+            if marker is None: break
 
 def main():
     pass
