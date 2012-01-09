@@ -16,17 +16,19 @@ from xml.dom import minidom #TODO: Use a faster way of processing XML
 import re
 from urllib2 import Request, urlopen, URLError
 from urllib import urlencode
-from urlparse import urlsplit
+from urlparse import urlsplit, parse_qs
 from datetime import datetime, timedelta
 
 DEVSTORE_ACCOUNT = "devstoreaccount1"
 DEVSTORE_SECRET_KEY = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
 
 DEVSTORE_BLOB_HOST = "127.0.0.1:10000"
+DEVSTORE_QUEUE_HOST = "127.0.0.1:10001"
 DEVSTORE_TABLE_HOST = "127.0.0.1:10002"
 
 CLOUD_BLOB_HOST = "blob.core.windows.net"
 CLOUD_TABLE_HOST = "table.core.windows.net"
+CLOUD_QUEUE_HOST = "queue.core.windows.net"
 
 PREFIX_PROPERTIES = "x-ms-prop-"
 PREFIX_METADATA = "x-ms-meta-"
@@ -64,27 +66,39 @@ class SharedKeyCredentials(object):
             path = path[path.index('/'):]
 
         canonicalized_resource = "/" + self._account + path
-        match = re.search(r'comp=[^&]*', query)
-        if match is not None:
-            canonicalized_resource += "?" + match.group(0)
-            
+        q = parse_qs(query)
+        if len(q.keys()) > 0:
+            canonicalized_resource +=''.join(["\n%s:%s" % (k, ','.join(sorted(q[k]))) for k in sorted(q.keys())])
+
         if use_path_style_uris is None:
             use_path_style_uris = re.match('^[\d.:]+$', host) is not None
 
+        request.add_header(PREFIX_STORAGE_HEADER + 'version', '2011-08-18')
         request.add_header(PREFIX_STORAGE_HEADER + 'date', time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())) #RFC 1123
+        if for_tables:
+            request.add_header('Date', request.get_header((PREFIX_STORAGE_HEADER + 'date').capitalize()))
+            request.add_header('DataServiceVersion', '1.0;NetFx')
+            request.add_header('MaxDataServiceVersion', '1.0;NetFx')
         canonicalized_headers = NEW_LINE.join(('%s:%s' % (k.lower(), request.get_header(k).strip()) for k in sorted(request.headers.keys(), lambda x,y: cmp(x.lower(), y.lower())) if k.lower().startswith(PREFIX_STORAGE_HEADER)))
 
         string_to_sign = request.get_method().upper() + NEW_LINE # verb
-        string_to_sign += NEW_LINE                               # MD5 not required
-        if request.get_header('Content-type') is not None:       # Content-Type
-            string_to_sign += request.get_header('Content-type')
-        string_to_sign += NEW_LINE
-        if for_tables: string_to_sign += request.get_header(PREFIX_STORAGE_HEADER.capitalize() + 'date') + NEW_LINE
-        else: string_to_sign += NEW_LINE                         # Date
         if not for_tables:
-            string_to_sign += canonicalized_headers + NEW_LINE   # Canonicalized headers
-        string_to_sign += canonicalized_resource                 # Canonicalized resource
-        
+            string_to_sign += (request.get_header('Content-encoding') or '') + NEW_LINE
+            string_to_sign += (request.get_header('Content-language') or '') + NEW_LINE
+            string_to_sign += (request.get_header('Content-length') or '') + NEW_LINE
+        string_to_sign += (request.get_header('Content-md5') or '') + NEW_LINE
+        string_to_sign += (request.get_header('Content-type') or '') + NEW_LINE
+        string_to_sign += (request.get_header('Date') or '') + NEW_LINE
+        if not for_tables:
+            string_to_sign += (request.get_header('If-modified-since') or '') + NEW_LINE
+            string_to_sign += (request.get_header('If-match') or '') + NEW_LINE
+            string_to_sign += (request.get_header('If-none-match') or '') + NEW_LINE
+            string_to_sign += (request.get_header('If-unmodified-since') or '') + NEW_LINE
+            string_to_sign += (request.get_header('Range') or '') + NEW_LINE
+        if not for_tables:
+            string_to_sign += canonicalized_headers + NEW_LINE
+        string_to_sign += canonicalized_resource
+
         request.add_header('Authorization', 'SharedKey ' + self._account + ':' + base64.encodestring(hmac.new(self._key, unicode(string_to_sign).encode("utf-8"), hashlib.sha256).digest()).strip())
         return request
 
@@ -130,7 +144,7 @@ class TableEntity(object): pass
 class QueueMessage(): pass
 
 class QueueStorage(Storage):
-    def __init__(self, host, account_name, secret_key, use_path_style_uris = None):
+    def __init__(self, host = DEVSTORE_QUEUE_HOST, account_name = DEVSTORE_ACCOUNT, secret_key = DEVSTORE_SECRET_KEY, use_path_style_uris = None):
         super(QueueStorage, self).__init__(host, account_name, secret_key, use_path_style_uris)
 
     def create_queue(self, name):
@@ -279,7 +293,7 @@ class BlobStorage(Storage):
         super(BlobStorage, self).__init__(host, account_name, secret_key, use_path_style_uris)
 
     def create_container(self, container_name, is_public = False):
-        req = RequestWithMethod("PUT", "%s/%s" % (self.get_base_url(), container_name))
+        req = RequestWithMethod("PUT", "%s/%s?restype=container" % (self.get_base_url(), container_name))
         req.add_header("Content-Length", "0")
         if is_public: req.add_header(PREFIX_PROPERTIES + "publicaccess", "true")
         self._credentials.sign_request(req)
@@ -290,7 +304,7 @@ class BlobStorage(Storage):
             return e.code
 
     def delete_container(self, container_name):
-        req = RequestWithMethod("DELETE", "%s/%s" % (self.get_base_url(), container_name))
+        req = RequestWithMethod("DELETE", "%s/%s?restype=container" % (self.get_base_url(), container_name))
         self._credentials.sign_request(req)
         try:
             response = urlopen(req)
@@ -314,6 +328,7 @@ class BlobStorage(Storage):
     def put_blob(self, container_name, blob_name, data, content_type = "", metadata = {}):
         req = RequestWithMethod("PUT", "%s/%s/%s" % (self.get_base_url(), container_name, blob_name), data=data)
         req.add_header("Content-Length", "%d" % len(data))
+        req.add_header('x-ms-blob-type', 'BlockBlob')
         for key, value in metadata.items():
             req.add_header("x-ms-meta-%s" % key, value)
         req.add_header("Content-Type", content_type)
@@ -371,6 +386,18 @@ class BlobStorage(Storage):
             try: marker = dom.getElementsByTagName("NextMarker")[0].firstChild.data
             except: marker = None
             if marker is None: break
+
+    def put_block(self, container_name, blob_name, block_id, data):
+        encoded_block_id = urlencode({"comp": "block", "blockid": block_id})
+        req = RequestWithMethod("PUT", "%s/%s/%s?%s" % (self.get_base_url(), container_name, blob_name, encoded_block_id), data=data)
+        req.add_header("Content-Type", "")
+        req.add_header("Content-Length", "%d" % len(data))
+        self._credentials.sign_request(req)
+        try:
+            response = urlopen(req)
+            return response.code
+        except URLError, e:
+            return e.code
 
 def main():
     pass
