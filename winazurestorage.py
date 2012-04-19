@@ -19,6 +19,8 @@ from urllib import urlencode
 from urlparse import urlsplit, parse_qs
 from datetime import datetime, timedelta
 
+import locale # dirty hack for locale changing
+
 DEVSTORE_ACCOUNT = "devstoreaccount1"
 DEVSTORE_SECRET_KEY = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
 
@@ -49,6 +51,9 @@ def parse_edm_datetime(input):
 def parse_edm_int32(input):
     return int(input)
 
+def parse_edm_int64(input):
+    return long(input)
+
 def parse_edm_double(input):
     return float(input)
 
@@ -66,26 +71,32 @@ class SharedKeyCredentials(object):
             path = path[path.index('/'):]
 
         canonicalized_resource = "/" + self._account + path
-        q = parse_qs(query)
-        if len(q.keys()) > 0:
-            canonicalized_resource +=''.join(["\n%s:%s" % (k, ','.join(sorted(q[k]))) for k in sorted(q.keys())])
+
+        if not for_tables:
+            q = parse_qs(query)
+            if len(q.keys()) > 0:
+                canonicalized_resource +=''.join(["\n%s:%s" % (k, ','.join(sorted(q[k]))) for k in sorted(q.keys())])
 
         if use_path_style_uris is None:
             use_path_style_uris = re.match('^[\d.:]+$', host) is not None
 
         request.add_header(PREFIX_STORAGE_HEADER + 'version', '2011-08-18')
+        locale.setlocale(locale.LC_ALL, "C") # dirty hack for locale changing
         request.add_header(PREFIX_STORAGE_HEADER + 'date', time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())) #RFC 1123
+
         if for_tables:
             request.add_header('Date', request.get_header((PREFIX_STORAGE_HEADER + 'date').capitalize()))
             request.add_header('DataServiceVersion', '1.0;NetFx')
             request.add_header('MaxDataServiceVersion', '1.0;NetFx')
+
         canonicalized_headers = NEW_LINE.join(('%s:%s' % (k.lower(), request.get_header(k).strip()) for k in sorted(request.headers.keys(), lambda x,y: cmp(x.lower(), y.lower())) if k.lower().startswith(PREFIX_STORAGE_HEADER)))
 
         string_to_sign = request.get_method().upper() + NEW_LINE # verb
         if not for_tables:
             string_to_sign += (request.get_header('Content-encoding') or '') + NEW_LINE
             string_to_sign += (request.get_header('Content-language') or '') + NEW_LINE
-            string_to_sign += (request.get_header('Content-length') or '') + NEW_LINE
+            string_to_sign += str(request.get_header('Content-length') or '') + NEW_LINE
+                
         string_to_sign += (request.get_header('Content-md5') or '') + NEW_LINE
         string_to_sign += (request.get_header('Content-type') or '') + NEW_LINE
         string_to_sign += (request.get_header('Date') or '') + NEW_LINE
@@ -272,6 +283,7 @@ class TableStorage(Storage):
                 t = property.getAttribute('m:type')
                 if t.lower() == 'edm.datetime': value = parse_edm_datetime(property.firstChild.data)
                 elif t.lower() == 'edm.int32': value = parse_edm_int32(property.firstChild.data)
+                elif t.lower() == 'edm.int64': value = parse_edm_int64(property.firstChild.data)
                 elif t.lower() == 'edm.boolean': value = parse_edm_boolean(property.firstChild.data)
                 elif t.lower() == 'edm.double': value = parse_edm_double(property.firstChild.data)
                 else: raise Exception(t.lower())
