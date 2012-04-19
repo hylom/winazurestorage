@@ -150,7 +150,125 @@ class Storage(object):
         else:
             return "http://%s.%s" % (self._account, self._host)
 
-class TableEntity(object): pass
+class TableEntityException(Exception):
+    def __init__(self, value):
+        self.value = value
+    def __str__(self):
+        return repr(self.value)
+
+class TableEntity(object):
+    "Table Entity"
+    def __init__(self, partition_key, row_key, props):
+        self.partition_key = partition_key
+        self.row_key = row_key
+        self.properties = props
+
+#    class Binary(object):
+#        pass
+
+#    class Guid(object):
+#        pass
+
+    class Boolean(int):
+        def __str__(self):
+            if self:
+                return "true"
+            else:
+                return "false"
+
+    def __repr__(self):
+        props = ",".join([ k + ":" + str(self.properties[k]) for k in self.properties])
+        return ",".join((self.partition_key, self.row_key, props))
+
+    def add_property(self, key, value):
+        self.properties[key] = value
+
+    def to_insert_xml(self):
+        contents = [self._make_property_node(propname, self.properties[propname]) for propname in self.properties]
+        contents_str = "\n".join(contents)
+        now_str = datetime.utcnow().isoformat()
+        xml = """<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<entry xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices" xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata" xmlns="http://www.w3.org/2005/Atom">
+  <title />
+  <author>
+    <name />
+  </author>
+  <id />
+  <content type="application/xml">
+    <m:properties>
+%(contents)s
+      <d:PartitionKey>%(partition_key)s</d:PartitionKey>
+      <d:RowKey>%(row_key)s</d:RowKey>
+      <d:Timestamp m:type="Edm.DateTime">0001-01-01T00:00:00</d:Timestamp>
+    </m:properties>
+  </content>
+</entry>
+""" % dict(contents=contents_str, now=now_str, partition_key=self.partition_key, row_key=self.row_key)
+        if isinstance(xml, unicode):
+            xml = xml.encode('utf-8')
+        return xml
+
+    def to_update_xml(self):
+        contents = [self._make_property_node(propname, self.properties[propname]) for propname in self.properties]
+        contents_str = "\n".join(contents)
+        now_str = datetime.utcnow().isoformat() + "Z"
+        xml = """<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<entry xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices" xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata" xmlns="http://www.w3.org/2005/Atom">
+  <title />
+  <updated>%(now)s</updated>
+  <author>
+    <name />
+  </author>
+  <id />
+  <content type="application/xml">
+    <m:properties>
+%(contents)s
+      <d:PartitionKey>%(partition_key)s</d:PartitionKey>
+      <d:RowKey>%(row_key)s</d:RowKey>
+      <d:Timestamp m:type="Edm.DateTime">0001-01-01T00:00:00</d:Timestamp>
+    </m:properties>
+  </content>
+</entry>
+""" % dict(contents=contents_str, now=now_str, partition_key=self.partition_key, row_key=self.row_key)
+        if isinstance(xml, unicode):
+            xml = xml.encode('utf-8')
+        return xml
+    
+    def _make_property_node(self, name, value):
+        type = ""
+        string_repr = ""
+#        if isinstance(value, TableEntity.Binary):
+#            type = "Edm.Binary"
+#            string_repr = str(TableEntity.Binary(value))
+        if isinstance(value, bool):
+            type = "Edm.Boolean"
+            string_repr = str(TableEntity.Boolean(value))
+        elif isinstance(value, datetime):
+            type = "Edm.DateTime"
+            string_repr = value.isoformat()
+        elif isinstance(value, float):
+            type = "Edm.Double"
+            string_repr = str(value)
+#        elif isinstance(value, TableEntity.Guid):
+#            type = "Edm.Guid"
+#            string_repr = str(TableEntity.Boolean(value))
+        elif isinstance(value, long):
+            type = "Edm.Int64"
+            string_repr = str(value)
+        elif isinstance(value, int):
+            type = "Edm.Int32"
+            string_repr = str(value)
+        elif isinstance(value, str):
+            type = "Edm.String"
+            string_repr = value
+        elif isinstance(value, unicode):
+            type = "Edm.String"
+            string_repr = value
+        if type is not "":
+            prop_element = """<d:%(name)s m:type="%(type)s">%(value)s</d:%(name)s>"""
+            return prop_element % dict(name=name, type=type, value=string_repr)
+        else:
+            raise TableEntityException("Unexpected property: %s" % (value,))
 
 class QueueMessage(): pass
 
@@ -300,6 +418,97 @@ class TableStorage(Storage):
         dom.unlink()
         return entities
 
+    def insert_entity(self, table_name, entity):
+        data = entity.to_insert_xml()
+        url = "%s/%s" % (self.get_base_url(), table_name)
+        req = winazurestorage.RequestWithMethod("POST", url, data=data)
+        req.add_header("Content-Length", "%d" % len(data))
+        req.add_header("Content-Type", "application/atom+xml")
+        self._credentials.sign_table_request(req)
+        try:
+            response = urlopen(req)
+            return response.code
+        except URLError, e:
+            return e.code
+
+    def update_entity(self, table_name, partition_key, row_key, entity):
+        data = entity.to_update_xml()
+        url = """%s/%s(PartitionKey='%s',RowKey='%s')""" % (self.get_base_url(), table_name, partition_key, row_key)
+
+        req = winazurestorage.RequestWithMethod("PUT", url, data=data)
+        req.add_header("Content-Length", "%d" % len(data))
+        req.add_header("Content-Type", "application/atom+xml")
+        self._credentials.sign_table_request(req)
+        try:
+            response = urlopen(req)
+            return response.code
+        except URLError, e:
+            print data
+            return e.code
+
+    def merge_entity(self, table_name, partition_key, row_key, entity):
+        data = entity.to_update_xml()
+        url = """%s/%s(PartitionKey='%s',RowKey='%s')""" % (self.get_base_url(), table_name, partition_key, row_key)
+        req = winazurestorage.RequestWithMethod("MERGE", url, data=data)
+        req.add_header("Content-Length", "%d" % len(data))
+        req.add_header("Content-Type", "application/atom+xml")
+        self._credentials.sign_table_request(req)
+        try:
+            response = urlopen(req)
+            return response.code
+        except URLError, e:
+            return e.code
+
+    def delete_entity(self, table_name, partition_key, row_key, condition="*"):
+        data = ""
+        url = """%s/%s(PartitionKey='%s',RowKey='%s')""" % (self.get_base_url(), table_name, partition_key, row_key)
+        req = winazurestorage.RequestWithMethod("DELETE", url, data)
+        req.add_header("Content-Length", "%d" % len(data))
+        req.add_header("Content-Type", "application/atom+xml")
+        req.add_header("If-Match", condition)
+        self._credentials.sign_table_request(req)
+        try:
+            response = urlopen(req)
+            return response.code
+        except URLError, e:
+            return e.code
+
+    def query_entity(self, table_name, filter):
+        quoted_filter = urllib.quote(filter)
+        url = """%s/%s()?$filter=%s""" % (self.get_base_url(), table_name, quoted_filter)
+        req = winazurestorage.RequestWithMethod("GET", url)
+        self._credentials.sign_table_request(req)
+        try:
+            resp = urlopen(req)
+        except URLError, e:
+            return e.code
+
+        dom = minidom.parseString(resp.read())
+        entries = dom.getElementsByTagName("entry")
+        entities = []
+        for entry in entries:
+            entities.append(self._parse_entity(entry))
+        dom.unlink()
+        return entities
+
+    def top_entity(self, table_name, size):
+        url = """%s/%s()?$top=%s""" % (self.get_base_url(), table_name, size)
+        req = winazurestorage.RequestWithMethod("GET", url)
+        self._credentials.sign_table_request(req)
+
+        try:
+            resp = urlopen(req)
+        except URLError, e:
+            return e.code
+
+        dom = minidom.parseString(resp.read())
+        entries = dom.getElementsByTagName("entry")
+        entities = []
+        for entry in entries:
+            entities.append(self._parse_entity(entry))
+        dom.unlink()
+        return entities
+
 class BlobStorage(Storage):
     def __init__(self, host = DEVSTORE_BLOB_HOST, account_name = DEVSTORE_ACCOUNT, secret_key = DEVSTORE_SECRET_KEY, use_path_style_uris = None):
         super(BlobStorage, self).__init__(host, account_name, secret_key, use_path_style_uris)
@@ -416,3 +625,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
