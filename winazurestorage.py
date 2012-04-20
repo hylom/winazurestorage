@@ -15,7 +15,7 @@ import os
 from xml.dom import minidom #TODO: Use a faster way of processing XML
 import re
 from urllib2 import Request, urlopen, URLError
-from urllib import urlencode
+from urllib import urlencode, quote
 from urlparse import urlsplit, parse_qs
 from datetime import datetime, timedelta
 
@@ -158,7 +158,7 @@ class TableEntityException(Exception):
 
 class TableEntity(object):
     "Table Entity"
-    def __init__(self, partition_key, row_key, props):
+    def __init__(self, partition_key="", row_key="", props={}):
         self.partition_key = partition_key
         self.row_key = row_key
         self.properties = props
@@ -186,7 +186,7 @@ class TableEntity(object):
     def to_insert_xml(self):
         contents = [self._make_property_node(propname, self.properties[propname]) for propname in self.properties]
         contents_str = "\n".join(contents)
-        now_str = datetime.utcnow().isoformat()
+        now_str = datetime.utcnow().isoformat() + "Z"
         xml = """<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <entry xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices" xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata" xmlns="http://www.w3.org/2005/Atom">
   <title />
@@ -421,7 +421,7 @@ class TableStorage(Storage):
     def insert_entity(self, table_name, entity):
         data = entity.to_insert_xml()
         url = "%s/%s" % (self.get_base_url(), table_name)
-        req = winazurestorage.RequestWithMethod("POST", url, data=data)
+        req = RequestWithMethod("POST", url, data=data)
         req.add_header("Content-Length", "%d" % len(data))
         req.add_header("Content-Type", "application/atom+xml")
         self._credentials.sign_table_request(req)
@@ -434,8 +434,10 @@ class TableStorage(Storage):
     def update_entity(self, table_name, partition_key, row_key, entity):
         data = entity.to_update_xml()
         url = """%s/%s(PartitionKey='%s',RowKey='%s')""" % (self.get_base_url(), table_name, partition_key, row_key)
+        if isinstance(url, unicode):
+            url = url.encode('utf-8')
 
-        req = winazurestorage.RequestWithMethod("PUT", url, data=data)
+        req = RequestWithMethod("PUT", url, data=data)
         req.add_header("Content-Length", "%d" % len(data))
         req.add_header("Content-Type", "application/atom+xml")
         self._credentials.sign_table_request(req)
@@ -443,13 +445,14 @@ class TableStorage(Storage):
             response = urlopen(req)
             return response.code
         except URLError, e:
-            print data
             return e.code
 
     def merge_entity(self, table_name, partition_key, row_key, entity):
         data = entity.to_update_xml()
         url = """%s/%s(PartitionKey='%s',RowKey='%s')""" % (self.get_base_url(), table_name, partition_key, row_key)
-        req = winazurestorage.RequestWithMethod("MERGE", url, data=data)
+        if isinstance(url, unicode):
+            url = url.encode('utf-8')
+        req = RequestWithMethod("MERGE", url, data=data)
         req.add_header("Content-Length", "%d" % len(data))
         req.add_header("Content-Type", "application/atom+xml")
         self._credentials.sign_table_request(req)
@@ -462,7 +465,9 @@ class TableStorage(Storage):
     def delete_entity(self, table_name, partition_key, row_key, condition="*"):
         data = ""
         url = """%s/%s(PartitionKey='%s',RowKey='%s')""" % (self.get_base_url(), table_name, partition_key, row_key)
-        req = winazurestorage.RequestWithMethod("DELETE", url, data)
+        if isinstance(url, unicode):
+            url = url.encode('utf-8')
+        req = RequestWithMethod("DELETE", url, data)
         req.add_header("Content-Length", "%d" % len(data))
         req.add_header("Content-Type", "application/atom+xml")
         req.add_header("If-Match", condition)
@@ -474,9 +479,11 @@ class TableStorage(Storage):
             return e.code
 
     def query_entity(self, table_name, filter):
-        quoted_filter = urllib.quote(filter)
+        quoted_filter = quote(filter)
         url = """%s/%s()?$filter=%s""" % (self.get_base_url(), table_name, quoted_filter)
-        req = winazurestorage.RequestWithMethod("GET", url)
+        if isinstance(url, unicode):
+            url = url.encode('utf-8')
+        req = RequestWithMethod("GET", url)
         self._credentials.sign_table_request(req)
         try:
             resp = urlopen(req)
@@ -493,7 +500,9 @@ class TableStorage(Storage):
 
     def top_entity(self, table_name, size):
         url = """%s/%s()?$top=%s""" % (self.get_base_url(), table_name, size)
-        req = winazurestorage.RequestWithMethod("GET", url)
+        if isinstance(url, unicode):
+            url = url.encode('utf-8')
+        req = RequestWithMethod("GET", url)
         self._credentials.sign_table_request(req)
 
         try:
